@@ -1,0 +1,154 @@
+from flask import Flask, render_template_string, request, redirect, url_for, session
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+import requests
+import os
+from google import genai
+
+app = Flask(__name__)
+app.secret_key = "jobshield_ultra_secret_key"
+
+# =========================
+# 🗄️ DATABASE CONFIG
+# =========================
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///jobshield.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password = db.Column(db.String(100), nullable=False)
+
+with app.app_context():
+    db.create_all()
+
+# =========================
+# 🔐 API KEY (CRITICAL)
+# Replace the text below with your real key from Google AI Studio
+# =========================
+GEMINI_KEY = "AIzaSyCX8v58iGOpiQLo_GpTYQCD_UOO5nWiqCU"
+
+try:
+    client = genai.Client(api_key=GEMINI_KEY)
+except:
+    client = None
+
+# =========================
+# 🎨 UI DESIGN
+# =========================
+STYLE = """
+<style>
+    body { background: #0f0c29; color: white; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; margin: 0; }
+    .box { background: #1a1a1a; padding: 40px; border-radius: 15px; width: 450px; border: 1px solid #333; margin-top: 50px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+    input, button { width: 100%; padding: 14px; margin-top: 15px; border-radius: 8px; border: none; box-sizing: border-box; font-size: 16px; }
+    input { background: #2b2b2b; color: white; border: 1px solid #444; }
+    button { background: linear-gradient(45deg, #00d2ff, #3a7bd5); color: white; font-weight: bold; cursor: pointer; transition: 0.3s; }
+    button:hover { opacity: 0.9; transform: translateY(-2px); }
+    .header { width: 100%; background: rgba(0,0,0,0.8); padding: 15px 30px; display: flex; justify-content: space-between; border-bottom: 1px solid #333; box-sizing: border-box; }
+    .job-card { background: #fff; color: #333; padding: 15px; margin-top: 12px; border-radius: 10px; border-left: 6px solid #00d2ff; display: flex; justify-content: space-between; align-items: center; }
+    .job-card a { color: #3a7bd5; text-decoration: none; font-weight: bold; }
+</style>
+"""
+
+# =========================
+# 🛡️ AUTHENTICATION
+# =========================
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if request.method == "POST":
+        uname = request.form.get("username")
+        uemail = request.form.get("email")
+        upass = request.form.get("password")
+        if User.query.filter((User.username == uname) | (User.email == uemail)).first():
+            return "User exists! <a href='/signup'>Try again</a>"
+        hashed_pwd = bcrypt.generate_password_hash(upass).decode('utf-8')
+        db.session.add(User(username=uname, email=uemail, password=hashed_pwd))
+        db.session.commit()
+        return redirect(url_for('login'))
+    return render_template_string(STYLE + '<div class="box"><h2>🛡️ Join JobShield</h2><form method="POST"><input name="username" placeholder="Username" required><input name="email" type="email" placeholder="Email" required><input name="password" type="password" placeholder="Password" required><button type="submit">Sign Up</button></form></div>')
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        user = User.query.filter_by(username=request.form.get("username")).first()
+        if user and bcrypt.check_password_hash(user.password, request.form.get("password")):
+            session['user_id'], session['username'] = user.id, user.username
+            return redirect(url_for('index'))
+        return "Failed! <a href='/login'>Try again</a>"
+    return render_template_string(STYLE + '<div class="box"><h2>🔐 Login</h2><form method="POST"><input name="username" placeholder="Username" required><input name="password" type="password" placeholder="Password" required><button type="submit">Login</button></form></div>')
+
+# =========================
+# 🏠 SMART DASHBOARD
+# =========================
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if 'user_id' not in session: return redirect(url_for('login'))
+
+    jobs = []
+    if request.method == "POST":
+        skills = request.form.get("skills")
+        if client:
+            try:
+                # Optimized Prompt for AI
+                prompt = f"List 5 real, high-quality company career page URLs for someone with {skills} skills. Format exactly like this: Company Name - URL"
+                response = client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+                lines = response.text.strip().split("\n")
+                for line in lines:
+                    if " - " in line:
+                        parts = line.split(" - ", 1)
+                        jobs.append({"name": parts[0].replace("*", ""), "url": parts[1].strip()})
+            except Exception as e:
+                print(f"AI Error: {e}") # This helps you debug in the VS Code terminal
+
+        # Final backup if AI fails or key is missing
+        if not jobs:
+            jobs = [
+                # --- ECE Leaders ---
+                {"name": "Intel Careers", "url": "https://www.intel.com/content/www/us/en/jobs/locations/india.html"},
+                {"name": "NVIDIA Jobs", "url": "https://www.nvidia.com/en-us/about-nvidia/careers/"},
+                {"name": "Qualcomm Careers", "url": "https://www.qualcomm.com/company/careers"},
+                {"name": "Texas Instruments", "url": "https://careers.ti.com/"},
+                # --- IT/Software Leaders ---
+                {"name": "Google Careers", "url": "https://careers.google.com"},
+                {"name": "Microsoft Jobs", "url": "https://careers.microsoft.com"},
+                {"name": "Amazon Jobs", "url": "https://www.amazon.jobs"},
+                {"name": "TCS Careers", "url": "https://www.tcs.com/careers"},
+                {"name": "Infosys Careers", "url": "https://www.infosys.com/careers/"}
+            ]
+
+    return render_template_string(STYLE + """
+        <div class="header">
+            <div style="font-size: 22px; font-weight: bold; color: #00d2ff;">🛡️ JOBSHIELD</div>
+            <div>Welcome, <b>{{ user_name }}</b> | <a href="/logout" style="color:#ff4d4d; text-decoration:none;">Logout</a></div>
+        </div>
+        <div class="box" style="width: 550px;">
+            <h2 style="text-align:center; margin-bottom:10px;">Find Verified Opportunities</h2>
+            <p style="text-align:center; color:#aaa; font-size:14px;">Powered by Gemini AI Security</p>
+            <form method="POST">
+                <input name="skills" placeholder="What are your skills? (e.g. Python, Java, Data Science)" required>
+                <button type="submit">Scan for Safe Jobs 🔍</button>
+            </form>
+            <div style="margin-top: 20px;">
+                {% for job in jobs %}
+                    <div class="job-card">
+                        <span>🏢 {{ job.name }}</span>
+                        <a href="{{ job.url }}" target="_blank">View Site ➔</a>
+                    </div>
+                {% endfor %}
+            </div>
+        </div>
+    """, user_name=session['username'], jobs=jobs)
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+if __name__ == "__main__":
+    app.run(debug=True)
